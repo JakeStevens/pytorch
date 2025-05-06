@@ -118,6 +118,37 @@ at::cuda::philox::unpack_cudnn<<<1, 1, 0, stream>>>(arg, seed_ptr, offset_ptr);
 namespace native {
 
 namespace {
+// Create output tensor with strides matching query layout
+at::Tensor create_output_with_matching_layout(
+  const at::Tensor& query,
+  at::IntArrayRef output_shape,
+  at::TensorOptions options
+) {
+// Get the "fill order" - an argsort on the strides of the query tensor
+const int dims = query.dim();
+std::vector<int64_t> fill_order(dims);
+std::iota(fill_order.begin(), fill_order.end(), 0);
+
+const auto query_strides = query.strides();
+std::stable_sort(
+    fill_order.begin(),
+    fill_order.end(),
+    [&query_strides](int64_t idx1, int64_t idx2) {
+      return query_strides[idx1] < query_strides[idx2];
+    });
+
+// Construct new strides that preserve the same layout ordering
+std::vector<int64_t> new_strides(dims);
+int64_t current_stride = 1;
+for (const int64_t dim_idx : fill_order) {
+  new_strides[dim_idx] = current_stride;
+  current_stride *= output_shape[dim_idx];
+}
+
+// Create tensor with the constructed strides
+return at::empty(output_shape, options)
+    .as_strided(output_shape, new_strides, 0);
+}
 
 
 static constexpr int TRANSFORM_BIAS_RESCALE_VEC = 4;
@@ -1433,11 +1464,8 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, c10::SymInt, c10::SymInt> _efficient_
     }
     kernel_launched = true;
 
-    res = at::empty(
-        {B, M, num_heads, Kv},
-        query.options().dtype(
-            CutlassToAtenDtype<typename Kernel::output_t>::atScalarType()));
-
+    auto opts = query.options().dtype(CutlassToAtenDtype<typename Kernel::output_t>::atScalarType());
+    res = create_output_with_matching_layout(query, {B, M, num_heads, Kv}, opts);
     // NOTE: Should be aligned (by padding) in case M is
     // not a good number for loading during backward
     constexpr decltype(M) kAlignLSE = Kernel::kAlignLSE;
@@ -1455,11 +1483,8 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, c10::SymInt, c10::SymInt> _efficient_
         : nullptr;
     at::Tensor output_accum;
     if (Kernel::kNeedsOutputAccumulatorBuffer) {
-      output_accum = at::empty(
-          {B, M, num_heads, Kv},
-          query.options().dtype(
-              CutlassToAtenDtype<
-                  typename Kernel::output_accum_t>::atScalarType()));
+      auto opts = query.options().dtype(CutlassToAtenDtype<typename Kernel::output_t>::atScalarType());
+      output_accum = create_output_with_matching_layout(query, {B, M, num_heads, Kv}, opts);
       p.output_accum_ptr =
           (typename Kernel::output_accum_t*)output_accum.data_ptr();
     } else {
@@ -1494,12 +1519,15 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, c10::SymInt, c10::SymInt> _efficient_
     ASSIGN_CHECK_OVERFLOW(p.q_strideB, query.stride(0));
     ASSIGN_CHECK_OVERFLOW(p.k_strideB, key.stride(0));
     ASSIGN_CHECK_OVERFLOW(p.v_strideB, value.stride(0));
+
     ASSIGN_CHECK_OVERFLOW(p.q_strideM, query.stride(1));
     ASSIGN_CHECK_OVERFLOW(p.k_strideM, key.stride(1));
     ASSIGN_CHECK_OVERFLOW(p.v_strideM, value.stride(1));
+
     ASSIGN_CHECK_OVERFLOW(p.q_strideH, query.stride(2));
     ASSIGN_CHECK_OVERFLOW(p.k_strideH, key.stride(2));
     ASSIGN_CHECK_OVERFLOW(p.v_strideH, value.stride(2));
+
     ASSIGN_CHECK_OVERFLOW(p.o_strideM, res.stride(1));
 
     if (bias.has_value()) {
