@@ -14,6 +14,7 @@ from torch._inductor.select_algorithm import (
 )
 from torch._inductor.test_case import run_tests, TestCase
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.testing._internal.common_cuda import SM90OrLater
 from torch.testing._internal.common_utils import skipIfXpu, TEST_WITH_ROCM
 from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_CPU, HAS_GPU
 
@@ -30,6 +31,7 @@ class TestSubgraphChoice(TestCase):
 
     @skipIfXpu
     @unittest.skipIf(TEST_WITH_ROCM, "decompose_k not supported on ROCm")
+    @unittest.skipIf(not SM90OrLater, "decompose_k only supported on SM90 or later")
     def test_subgraph_decompose_k(self):
         from torch._inductor.kernel.mm import aten_mm
         from torch._inductor.kernel.mm_common import mm_args
