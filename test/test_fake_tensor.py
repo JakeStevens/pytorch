@@ -3696,6 +3696,26 @@ class TestFakeTensorProp(TestCase):
             self.assertEqual(len(actual), len(expected))
             self.assertEqual([t.dim() for t in actual], [t.dim() for t in expected])
 
+    def test_masked_select_broadcast_nnz_bound(self):
+        # masked_select broadcasts its input and mask, so the unbacked
+        # output size must be bounded by the broadcasted numel, which can
+        # exceed the input numel.
+        for input_shape, mask_shape, expected_upper in [
+            ((1, 6, 8), (2, 2, 2, 8, 1, 8), 3072),
+            ((3,), (2, 3), 6),
+            ((2, 3), (2, 3), 6),
+        ]:
+            with FakeTensorMode(shape_env=ShapeEnv()) as mode:
+                out = torch.masked_select(
+                    torch.ones(input_shape, dtype=torch.bool),
+                    torch.ones(mask_shape, dtype=torch.bool),
+                )
+
+            nnz = out.shape[0]
+            nnz_range = mode.shape_env.var_to_range[nnz.node.expr]
+            self.assertEqual(nnz_range.lower, 0)
+            self.assertEqual(nnz_range.upper, expected_upper)
+
     def test_nan_to_num(self):
         shape_env = ShapeEnv()
         fake_mode = FakeTensorMode(shape_env=shape_env)

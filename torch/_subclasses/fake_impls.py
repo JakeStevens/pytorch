@@ -1612,6 +1612,35 @@ def slice_forward(
         return self.as_strided(sizes, strides, storage_offset)  # type: ignore[return-value]
 
 
+def _broadcast_numel(self: FakeTensor, mask: FakeTensor) -> IntLikeType:
+    """
+    Number of elements in the result of broadcasting ``self`` and ``mask``,
+    as an int or a SymInt expression, without guarding on symbolic sizes.
+    When a pair of aligned sizes cannot be statically resolved to a single
+    size, fall back to the looser bound ``self.numel() * mask.numel()``
+    (each broadcast size is at most the product of the aligned sizes).
+    """
+    sizes: list[IntLikeType] = []
+    for a, b in itertools.zip_longest(
+        reversed(self.shape), reversed(mask.shape), fillvalue=1
+    ):
+        if isinstance(a, int) and a == 1:
+            sizes.append(b)
+        elif isinstance(b, int) and b == 1:
+            sizes.append(a)
+        elif a is b or (isinstance(a, int) and isinstance(b, int) and a == b):
+            sizes.append(a)
+        elif (
+            isinstance(a, torch.SymInt)
+            and isinstance(b, torch.SymInt)
+            and a.node.expr == b.node.expr
+        ):
+            sizes.append(a)
+        else:
+            return math.prod(self.shape) * math.prod(mask.shape)  # type: ignore[return-value]
+    return math.prod(sizes)
+
+
 @register_op_impl(torch.ops.aten.masked_select.default)
 def masked_select(
     fake_mode: FakeTensorMode, func: OpOverload, self: FakeTensor, mask: FakeTensor
@@ -1638,11 +1667,16 @@ def masked_select(
 
     # If num elements is expressed symbolically, calculate
     # the concrete value based on upper bounds. Otherwise,
-    # we can set max val directly.
-    if not has_free_symbols(self.numel()):
-        num_elements = int(self.numel())
+    # we can set max val directly.  NB: masked_select broadcasts
+    # self and mask against each other (e.g., self (1, 6, 8) and
+    # mask (2, 2, 2, 8, 1, 8) broadcast to 3072 elements), so the
+    # relevant numel is that of the broadcasted shape, which can
+    # exceed self.numel().
+    broadcast_numel = _broadcast_numel(self, mask)
+    if not has_free_symbols(broadcast_numel):
+        num_elements = int(broadcast_numel)
     else:
-        prod_node = math.prod(self.shape).node  # type: ignore[union-attr]
+        prod_node = broadcast_numel.node  # type: ignore[union-attr]
         prod_range = bound_sympy(prod_node.expr, prod_node.shape_env.var_to_range)
         if isinstance(prod_range.upper, IntInfinity):
             num_elements = sys.maxsize - 1
